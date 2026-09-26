@@ -614,17 +614,34 @@ static int parse_power_dt(struct device_node *np, struct device *dev,
 static int parse_clock_dt(struct device_node *np, struct device *dev,
 			  struct nx_clipper *me)
 {
+	int ret;
+
 	me->pwm = devm_of_pwm_get(dev, np, NULL);
 	if (!IS_ERR(me->pwm)) {
 		unsigned int period = pwm_get_period(me->pwm);
 		unsigned int duty_cycle =
 			TO_DUTY_NS(DEFAULT_DUTY_CYCLE, period);
+		unsigned int period_ns = TO_PERIOD_NS(period);
 
-		pwm_config(me->pwm, duty_cycle, TO_PERIOD_NS(period));
-		dev_info(dev, "[%s] name:%s, period:%d, duty_cycle:%d\n",
-				__func__, me->pwm->label, me->pwm->period,
-				me->pwm->duty_cycle);
-		pwm_enable(me->pwm);
+		if (!period)
+			return -EINVAL;
+
+		ret = pwm_config(me->pwm, duty_cycle, period_ns);
+		if (ret) {
+			dev_err(dev, "failed to configure MCLK: %u Hz, period %u ns, duty %u ns (%d)\n",
+				period, period_ns, duty_cycle, ret);
+			return ret;
+		}
+
+		ret = pwm_enable(me->pwm);
+		if (ret) {
+			dev_err(dev, "failed to enable MCLK: %d\n", ret);
+			return ret;
+		}
+
+		dev_info(dev, "[%s] %s configured: %u Hz, period %u ns, duty %u ns\n",
+			 __func__, me->pwm->label, period, period_ns,
+			 duty_cycle);
 	} else
 		me->pwm = NULL;
 
@@ -1005,6 +1022,12 @@ static int alloc_dma_buffer(struct nx_clipper *me)
 			cbcr_size = buf->dma_addr[2] - buf->dma_addr[1];
 		}
 		me->buf.size = y_size + (cbcr_size * 2);
+		dev_info(&me->pdev->dev,
+			 "DMA: format=0x%x dma0=%pad dma1=%pad dma2=%pad "
+			 "stride0=%u stride1=%u ysize=%u cbcrsize=%u total=%u\n",
+			 me->buf.format, &buf->dma_addr[0], &buf->dma_addr[1],
+			 &buf->dma_addr[2], buf->stride[0], buf->stride[1],
+			 y_size, cbcr_size, me->buf.size);
 		me->buf.addr = dma_alloc_coherent(&me->pdev->dev,
 				me->buf.size,
 				&me->buf.handle[0], GFP_KERNEL);
@@ -1017,6 +1040,10 @@ static int alloc_dma_buffer(struct nx_clipper *me)
 		me->buf.stride[1] = buf->stride[1];
 		me->buf.handle[1] = me->buf.handle[0] + y_size;
 		me->buf.handle[2] = me->buf.handle[1] + cbcr_size;
+		dev_info(&me->pdev->dev,
+			 "DMA coherent: dma0=%pad dma1=%pad dma2=%pad total=%u\n",
+			 &me->buf.handle[0], &me->buf.handle[1],
+			 &me->buf.handle[2], me->buf.size);
 	}
 
 	return 0;
@@ -1045,6 +1072,11 @@ static int update_buffer(struct nx_clipper *me)
 		return -ENOENT;
 	}
 
+	dev_info_ratelimited(&me->pdev->dev,
+		"Clipper DMA: mem_fmt=0x%x %ux%u dma0=%pad dma1=%pad dma2=%pad stride0=%u stride1=%u\n",
+		me->mem_fmt, me->crop.width, me->crop.height,
+		&buf->dma_addr[0], &buf->dma_addr[1], &buf->dma_addr[2],
+		buf->stride[0], buf->stride[1]);
 	nx_vip_set_clipper_addr(me->module, me->mem_fmt,
 				me->crop.width, me->crop.height,
 				buf->dma_addr[0], buf->dma_addr[1],
@@ -2010,6 +2042,18 @@ static int register_sensor_subdev(struct nx_clipper *me)
 		return -ENODEV;
 	}
 
+	/*
+	 * The I2C driver's probe reads the sensor chip ID immediately.
+	 * Bring the CIF sensor out of reset and power-down before creating
+	 * its I2C client, rather than waiting until stream-on.
+	 */
+	ret = enable_sensor_power(me, true);
+	if (ret) {
+		dev_err(dev, "failed to power on sensor before probe\n");
+		i2c_put_adapter(adapter);
+		return ret;
+	}
+
 	request_module(I2C_MODULE_PREFIX "%s", info->board_info.type);
 	client = i2c_new_device(adapter, &info->board_info);
 	if (!client) {
@@ -2088,6 +2132,7 @@ error:
 	i2c_put_adapter(adapter);
 	if (client)
 		i2c_unregister_device(client);
+	enable_sensor_power(me, false);
 
 	return ret;
 }

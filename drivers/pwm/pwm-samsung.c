@@ -299,8 +299,10 @@ static unsigned int pwm_samsung_optimal_freq(struct samsung_pwm_chip *chip,
 		clk_rate = clk_get_rate(clk);
 		optimal_freq[1] = calc_base_freq(clk_rate, freq);
 
-		if (optimal_freq[0] >= optimal_freq[1])
+		if (optimal_freq[0] <= optimal_freq[1])
 			pwm_samsung_set_tclk(chip, chan);
+		else
+			pwm_samsung_set_divisor(chip, chan, 1);
 	} else {
 		pwm_samsung_set_tclk(chip, chan);
 	}

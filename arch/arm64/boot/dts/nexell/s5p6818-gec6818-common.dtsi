@@ -49,11 +49,41 @@
 		ethernet0 = &gmac0;
 	};
 
-	nx-v4l2 {
-		status = "okay";
-	};
+        nx-v4l2 {
+                status = "okay";
+        };
 
-	soc {
+        /*
+         * The CIF connector supplies 2.8 V AVDD and 1.8 V I/O power.
+         * OV5640 modules used with this connector provide their own 1.5 V
+         * core regulator, so these always-on supplies describe the board
+         * rails to the standard OV5640 V4L2 sub-device driver.
+         */
+        ov5640_avdd: regulator-ov5640-avdd {
+                compatible = "regulator-fixed";
+                regulator-name = "ov5640-avdd";
+                regulator-min-microvolt = <2800000>;
+                regulator-max-microvolt = <2800000>;
+                regulator-always-on;
+        };
+
+        ov5640_dovdd: regulator-ov5640-dovdd {
+                compatible = "regulator-fixed";
+                regulator-name = "ov5640-dovdd";
+                regulator-min-microvolt = <1800000>;
+                regulator-max-microvolt = <1800000>;
+                regulator-always-on;
+        };
+
+        ov5640_dvdd: regulator-ov5640-dvdd {
+                compatible = "regulator-fixed";
+                regulator-name = "ov5640-dvdd";
+                regulator-min-microvolt = <1500000>;
+                regulator-max-microvolt = <1500000>;
+                regulator-always-on;
+        };
+
+        soc {
 		#include "s5p6818-pinctrl.dtsi"
 
 		clocks {
@@ -735,20 +765,55 @@
 };
 
 &vip_0 {
-	clk-base = <0xc00c1000>;
-	status = "okay";
+        clk-base = <0xc00c1000>;
+        status = "okay";
 };
 
 &clipper_0 {
-	interface_type = <NX_CAPTURE_INTERFACE_PARALLEL>;
-	pinctrl-names = "default";
-	pinctrl-0 = <&vid0_data_clk &vid0_sync>;
-	clock_source = <4>;
-	data_order = <NX_VIN_Y0CBY1CR>;
-	port = <0>;
-	external_sync = <0>;
-	interlace = <0>;
-	status = "okay";
+        interface_type = <NX_CAPTURE_INTERFACE_PARALLEL>;
+        pinctrl-names = "default";
+        pinctrl-0 = <&vid0_data_clk &vid0_sync>;
+        clock_source = <4>;
+        data_order = <NX_VIN_CBY0CRY1>;
+        port = <0>;
+        external_sync = <1>;
+        h_frontporch = <0>;
+        h_syncwidth = <0>;
+        h_backporch = <2>;
+        v_frontporch = <0>;
+        v_syncwidth = <0>;
+        v_backporch = <2>;
+        interlace = <0>;
+        status = "okay";
+        /* CAM_PN is controlled by Clipper; OV5640 owns reset and powerdown. */
+        gpios = <&gpio_c 4 GPIO_ACTIVE_HIGH>;
+
+        sensor {
+                compatible = "ovti,ov5640";
+                type = <NX_CAPTURE_SENSOR_I2C>;
+                i2c_name = "ov5640";
+                i2c_adapter = <0>;
+                addr = <0x3c>;
+                reset-gpios = <&gpio_c 5 GPIO_ACTIVE_LOW>;
+                powerdown-gpios = <&gpio_c 6 GPIO_ACTIVE_HIGH>;
+                AVDD-supply = <&ov5640_avdd>;
+                DOVDD-supply = <&ov5640_dovdd>;
+                DVDD-supply = <&ov5640_dvdd>;
+        };
+
+        power {
+                /* Keep CAM_PN high and provide MCLK before OV5640 probes. */
+                /* PWM1 drives the CIF connector's 24 MHz CAM_MCLK. */
+                pwms = <&pwm 1 24000000 0>;
+                enable_seq = <
+                        NX_ACTION_START NX_ACTION_TYPE_GPIO 0 1 1 NX_ACTION_END 
+                        NX_ACTION_START NX_ACTION_TYPE_CLOCK 1 1 NX_ACTION_END  
+                        NX_ACTION_START NX_ACTION_TYPE_GPIO 0 1 20 NX_ACTION_END
+                >;
+                disable_seq = <
+                        NX_ACTION_START NX_ACTION_TYPE_GPIO 0 0 0 NX_ACTION_END 
+                >;
+        };
 };
 
 &dp_drm {

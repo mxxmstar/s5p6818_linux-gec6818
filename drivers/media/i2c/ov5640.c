@@ -292,7 +292,7 @@ static const struct reg_value ov5640_init_setting_30fps_VGA[] = {
 	{0x3a0d, 0x04, 0, 0}, {0x3a14, 0x03, 0, 0}, {0x3a15, 0xd8, 0, 0},
 	{0x4001, 0x02, 0, 0}, {0x4004, 0x02, 0, 0}, {0x3000, 0x00, 0, 0},
 	{0x3002, 0x1c, 0, 0}, {0x3004, 0xff, 0, 0}, {0x3006, 0xc3, 0, 0},
-	{0x300e, 0x45, 0, 0}, {0x302e, 0x08, 0, 0}, {0x4300, 0x30, 0, 0},
+        {0x300e, 0x45, 0, 0}, {0x302e, 0x08, 0, 0}, {0x4300, 0x3f, 0, 0},
 	{0x501f, 0x00, 0, 0}, {0x4713, 0x03, 0, 0}, {0x4407, 0x04, 0, 0},
 	{0x440e, 0x00, 0, 0}, {0x460b, 0x35, 0, 0}, {0x460c, 0x22, 0, 0},
 	{0x4837, 0x0a, 0, 0}, {0x4800, 0x04, 0, 0}, {0x3824, 0x02, 0, 0},
@@ -444,7 +444,7 @@ static const struct reg_value ov5640_init_setting_30fps_VGA[] = {
 	{0x3006, 0xc3, 0, 0},
 	{0x300e, 0x45, 0, 0},
 	{0x302e, 0x08, 0, 0},
-	{0x4300, 0x30, 0, 0},
+        {0x4300, 0x3f, 0, 0},
 	{0x501f, 0x00, 0, 0},
 	{0x5684, 0x05, 0, 0},
 	{0x5685, 0x00, 0, 0},
@@ -1719,9 +1719,14 @@ static int ov5640_set_stream_dvp(struct ov5640_dev *sensor, bool on)
 	if (ret)
 		return ret;
 
-	/* adjust to ITU656 */
-	ov5640_read_reg(sensor, OV5640_REG_CCIR656_CTRL00, &mode);
-	ov5640_write_reg(sensor, OV5640_REG_CCIR656_CTRL00, mode|0x01);
+        /* Clipper uses separate VSYNC/HREF signals, not BT.656 sync codes. */
+        ret = ov5640_read_reg(sensor, OV5640_REG_CCIR656_CTRL00, &mode);
+        if (ret)
+                return ret;
+        ret = ov5640_write_reg(sensor, OV5640_REG_CCIR656_CTRL00,
+                               mode & ~0x01);
+        if (ret)
+                return ret;
 
 	/*
 	 * enable D[5:0] DVP data lines
@@ -2353,7 +2358,12 @@ static int ov5640_set_power(struct ov5640_dev *sensor, bool on)
 	dbg(2, dev, "%s %d\n", __func__, on);
 
 	if (on) {
-		clk_prepare_enable(sensor->xclk);
+		/* On GEC6818, Clipper supplies MCLK through PWM1. */
+		if (sensor->xclk) {
+			ret = clk_prepare_enable(sensor->xclk);
+			if (ret)
+				return ret;
+		}
 		ret = regulator_bulk_enable(OV5640_NUM_SUPPLIES,
 					    sensor->supplies);
 		if (ret)
@@ -2402,7 +2412,8 @@ power_off:
 	ov5640_power(sensor, false);
 	regulator_bulk_disable(OV5640_NUM_SUPPLIES, sensor->supplies);
 xclk_off:
-	clk_disable_unprepare(sensor->xclk);
+	if (sensor->xclk)
+		clk_disable_unprepare(sensor->xclk);
 	return ret;
 }
 
@@ -3121,17 +3132,7 @@ static int ov5640_probe(struct i2c_client *client,
 
 	sensor->ae_target = 52;
 
-	chip_id[0] = chip_id[1] = 0;
-	ov5640_read_reg(sensor, OV5640_REG_CHIP_ID, &chip_id[0]);
-	ret = ov5640_read_reg(sensor, (OV5640_REG_CHIP_ID+1), &chip_id[1]);
-	if (ret !=0 || chip_id[0]!=0x56 || chip_id[1]!=0x40) {
-		dev_err(dev, "[OV5640] error chipid 0x%x%x\n", chip_id[0], chip_id[1]);
-		return -ENODEV;
-	} else {
-		dev_info(dev, "[OV5640] get chipid 0x%x%x\n", chip_id[0], chip_id[1]);
-	}
-
-	dbg(2, dev, "[OV5640] interval:%d, fmt:0x%x\n",
+        dbg(2, dev, "[OV5640] interval:%d, fmt:0x%x\n",
 		sensor->frame_interval.denominator, sensor->fmt.code);
 
 	/* get system clock (xclk) */
@@ -3154,13 +3155,33 @@ static int ov5640_probe(struct i2c_client *client,
 	}
 
 	/* request optional power down pin */
-	sensor->pwdn_gpio = devm_gpiod_get_optional(dev, "powerdown",
-						    GPIOD_OUT_HIGH);
-	dbg(2, dev, "[OV5640] pwdn_gpio:%p\n", sensor->pwdn_gpio);
+        sensor->pwdn_gpio = devm_gpiod_get_optional(dev, "powerdown",
+                                                    GPIOD_OUT_HIGH);
+        if (IS_ERR(sensor->pwdn_gpio))
+                return PTR_ERR(sensor->pwdn_gpio);
+        dbg(2, dev, "[OV5640] pwdn_gpio:%p\n", sensor->pwdn_gpio);
 	/* request optional reset pin */
-	sensor->reset_gpio = devm_gpiod_get_optional(dev, "reset",
-						     GPIOD_OUT_HIGH);
-	dbg(2, dev, "[OV5640] reset_gpio:%p\n", sensor->reset_gpio);
+        sensor->reset_gpio = devm_gpiod_get_optional(dev, "reset",
+                                                     GPIOD_OUT_HIGH);
+        if (IS_ERR(sensor->reset_gpio))
+                return PTR_ERR(sensor->reset_gpio);
+        dbg(2, dev, "[OV5640] reset_gpio:%p\n", sensor->reset_gpio);
+
+        ov5640_reset(sensor);
+        ov5640_power(sensor, true);
+
+        chip_id[0] = chip_id[1] = 0;
+        ret = ov5640_read_reg(sensor, OV5640_REG_CHIP_ID, &chip_id[0]);
+        if (!ret)
+                ret = ov5640_read_reg(sensor, OV5640_REG_CHIP_ID + 1,
+                                      &chip_id[1]);
+        if (ret || chip_id[0] != 0x56 || chip_id[1] != 0x40) {
+                dev_err(dev, "[OV5640] error chipid 0x%x%x (%d)\n",
+                        chip_id[0], chip_id[1], ret);
+                return ret ? ret : -ENODEV;
+        }
+        dev_info(dev, "[OV5640] get chipid 0x%x%x\n",
+                 chip_id[0], chip_id[1]);
 
 	v4l2_i2c_subdev_init(&sensor->sd, client, &ov5640_subdev_ops);
 
